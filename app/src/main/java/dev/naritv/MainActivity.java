@@ -33,6 +33,10 @@ public final class MainActivity extends Activity {
     private Button probe;
     private Button switchGame;
     private Button restore;
+    private Button refresh;
+    private Button autoToggle;
+    private Button autoStatus;
+    private boolean autoEnabled;
     private Button auth;
     private boolean binding;
 
@@ -49,9 +53,9 @@ public final class MainActivity extends Activity {
 
     private final Shizuku.UserServiceArgs serviceArgs =
             new Shizuku.UserServiceArgs(new ComponentName("dev.naritv", "dev.naritv.RouteService"))
-                    .daemon(false)
+                    .daemon(true)
                     .processNameSuffix("route")
-                    .version(1)
+                    .version(2)
                     .tag("nari-route");
     private final ServiceConnection connection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -59,6 +63,7 @@ public final class MainActivity extends Activity {
             runOnUiThread(() -> {
                 status("Shizuku подключён. " + safePing());
                 refreshButtons();
+                if (autoEnabled) performAuto(true, false);
             });
         }
         @Override public void onServiceDisconnected(ComponentName name) {
@@ -73,6 +78,7 @@ public final class MainActivity extends Activity {
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        autoEnabled = getSharedPreferences("nari", MODE_PRIVATE).getBoolean("auto", false);
         getWindow().getDecorView().setBackgroundColor(Color.rgb(20, 23, 30));
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
@@ -116,11 +122,21 @@ public final class MainActivity extends Activity {
         switchGame = button("3 · Переключить весь звук на Game");
         switchGame.setOnClickListener(v -> perform("switch"));
         root.addView(switchGame);
+        refresh = button("4 · Обновить Game (при пропаже звука)");
+        refresh.setOnClickListener(v -> perform("refresh"));
+        root.addView(refresh);
+        autoToggle = button("Автовосстановление при USB-переподключении");
+        autoToggle.setOnClickListener(v -> performAuto(!autoEnabled, true));
+        root.addView(autoToggle);
+        updateAutoButton();
+        autoStatus = button("Посмотреть состояние автоматики");
+        autoStatus.setOnClickListener(v -> perform("status"));
+        root.addView(autoStatus);
         restore = button("Вернуть Chat / откатить");
         restore.setOnClickListener(v -> perform("restore"));
         root.addView(restore);
 
-        result = text("Вывод появится здесь. Если пропал звук — переподключи USB-донгл.", 16, 0xffd9deea);
+        result = text("Если пропал звук — нажми «Обновить Game». После этого можно включить автоматику.", 16, 0xffd9deea);
         LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(-1, -2);
         rp.topMargin = dp(18);
         root.addView(result, rp);
@@ -180,6 +196,9 @@ public final class MainActivity extends Activity {
         probe.setEnabled(available);
         switchGame.setEnabled(available);
         restore.setEnabled(available);
+        refresh.setEnabled(available);
+        autoToggle.setEnabled(available);
+        autoStatus.setEnabled(available);
         auth.setEnabled(!available);
     }
 
@@ -214,6 +233,9 @@ public final class MainActivity extends Activity {
         probe.setEnabled(false);
         switchGame.setEnabled(false);
         restore.setEnabled(false);
+        refresh.setEnabled(false);
+        autoToggle.setEnabled(false);
+        autoStatus.setEnabled(false);
         result.setText("Выполняю " + op + " для card=" + cardNum + "…");
         new Thread(() -> {
             String output;
@@ -221,22 +243,61 @@ public final class MainActivity extends Activity {
                 switch (op) {
                     case "probe": output = active.addGame(cardNum); break;
                     case "switch": output = active.switchGame(cardNum); break;
+                    case "refresh": output = active.refreshGame(cardNum); break;
+                    case "status": output = active.getAutoStatus(); break;
                     default: output = active.restore(cardNum); break;
                 }
             } catch (Exception e) { output = "Ошибка Binder: " + e; }
             String message = output;
             runOnUiThread(() -> {
                 result.setText(message);
+                if ("restore".equals(op)) {
+                    autoEnabled = false;
+                    getSharedPreferences("nari", MODE_PRIVATE).edit().putBoolean("auto", false).apply();
+                    updateAutoButton();
+                }
                 refreshButtons();
             });
         }, "route-request").start();
+    }
+
+    private void updateAutoButton() {
+        if (autoToggle != null) autoToggle.setText("Автовосстановление USB: " +
+                (autoEnabled ? "ВКЛ · отключить" : "ВЫКЛ · включить"));
+    }
+
+    private void performAuto(boolean enabled, boolean report) {
+        final IRouteService active = route;
+        if (active == null) { if (report) result.setText("Shizuku не подключён"); return; }
+        final int cardNum;
+        try { cardNum = Integer.parseInt(card.getText().toString()); }
+        catch (NumberFormatException e) { if (report) result.setText("Введи ALSA card"); return; }
+        autoToggle.setEnabled(false);
+        new Thread(() -> {
+            String output;
+            try { output = active.setAutoRepair(cardNum, enabled); }
+            catch (Exception e) { output = "ОШИБКА: " + e; }
+            final String message = output;
+            runOnUiThread(() -> {
+                if (!message.startsWith("ОШИБКА:")) {
+                    autoEnabled = enabled;
+                    getSharedPreferences("nari", MODE_PRIVATE).edit()
+                            .putBoolean("auto", enabled).apply();
+                }
+                updateAutoButton();
+                if (report) result.setText(message +
+                        "\nАвтоматическая проверка работает, пока живы Shizuku и его UserService. " +
+                        "Переподключение самой гарнитуры без USB-события не всегда обнаруживается.");
+                refreshButtons();
+            });
+        }, "auto-request").start();
     }
 
     @Override protected void onDestroy() {
         Shizuku.removeBinderReceivedListener(binderReceivedListener);
         Shizuku.removeBinderDeadListener(binderDeadListener);
         Shizuku.removeRequestPermissionResultListener(permissionListener);
-        // Shizuku UserService is non-daemon; avoid calling unbind from a dead Binder.
+        // A persistent Shizuku UserService keeps monitoring after Activity is closed.
         try { if (binding && Shizuku.pingBinder()) Shizuku.unbindUserService(serviceArgs, connection, false); }
         catch (Exception ignored) {}
         super.onDestroy();

@@ -10,8 +10,8 @@ android {
         applicationId 'dev.naritv'
         minSdk 28
         targetSdk 33
-        versionCode 1
-        versionName '0.1-experimental'
+        versionCode 2
+        versionName '0.2-auto-experimental'
     }
     buildFeatures { aidl true }
     compileOptions {

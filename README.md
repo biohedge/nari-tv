@@ -1,50 +1,46 @@
-# Nari TV Router (Android TV 14 / Razer Nari Ultimate)
+# Nari TV Router 0.2: Game refresh & USB auto-recovery (EXPERIMENTAL)
 
-**Экспериментальный проект, не протестирован на TCL. Это ИСХОДНИКИ, не готовый APK.**
+Project built from Nari TV Router 0.1 for Android TV 14 and Razer Nari Ultimate.
 
-ТВ видит USB Nari Ultimate, но выбирает ALSA card=4;device=0 (Chat). При этом card=4;device=1 (предположительно Game) существует в `/dev/snd`. Системный AudioService принимает команды зарегистрировать второй выход только от привилегированного UID. Приложение использует Shizuku UserService, запускаемый как shell UID 2000, чтобы попробовать зарегистрировать D1 через скрытый IAudioService. Без Shizuku / root кнопки не работают. Возможна несовместимость USB HAL.
+## Why this version exists
 
-## Как получить APK без Android Studio или SDK на Mac
+The device really produces sound over `card=N;device=1` (Game) after Nari TV Router has added Game and removed Chat. However, after disconnect/reconnect Android may show Game as the selected Audio Policy output without reopening the physical HAL output, so sound may be missing until the output is toggled.
 
-В репозитории GitHub Actions есть файл `.github/workflows/build-apk.yml` для облачной сборки. Загрузите проект в свой GitHub-репозиторий, затем запустите **Actions → Build experimental Nari TV APK → Run workflow**. В завершившейся сборке будет артефакт `nari-tv-router-debug-apk` с `app-debug.apk`.
+## New controls
 
-Для локальной сборки при наличии Gradle 8.10.2 + Android SDK Platform 35/Build Tools 35:
+- **4 · Обновить Game (при пропаже звука)** — performs an explicit transition `Game UNAVAILABLE -> 850ms -> Game AVAILABLE -> Chat UNAVAILABLE`. This is **not the same** as just announcing that Game is available. It should ask Android Audio Policy/AudioFlinger to recreate the USB output. It hasn't been confirmed to repair playback on this particular TCL firmware yet. Expect a brief audio interruption.
+- **Автовосстановление USB** — starts a persistent daemon-mode Shizuku UserService (UID shell 2000), monitoring the selected ALSA card about once per second. It schedules a refresh after detecting disappearance/reappearance of the PCM device nodes or Android re-registering Chat. It never periodically bounces the output while playback is otherwise working.
+- **Посмотреть состояние автоматики** — displays the last action or error.
+- **Вернуть Chat** — also disables auto-recovery so it cannot unexpectedly switch back to Game.
 
-```bash
-gradle :app:assembleDebug
-```
+### Limitations
 
-## Запуск на телевизоре
+1. If **only the headset power** toggles while the USB dongle remains connected, Android may generate no USB/ALSA events. No reliable event-based auto-recovery can be promised; use the one-click **Обновить Game** button. The dongle may still be attached to the USB bus the entire time.
+2. The monitor watches the **configured ALSA card** (4 in the original user's log). A new card number after USB re-enumeration requires opening the app and updating the card value and enabling auto-repair again. This avoids accidentally touching another USB sound card.
+3. Shizuku is still required and must be restarted after reboot if running through ADB without root.
+4. The `setWiredDeviceConnectionState` call tells AudioService about availability. It cannot prove that a hardware stream reopened successfully. Actual sound still needs testing.
+5. Installing the debug APK over the previous version preserves local settings. Both versions share the `dev.naritv` package and should be signed by the same debug key. If installing from a different GitHub Actions environment changed the signing key, Android might reject an update; in that case you may need to uninstall the old build (losing app prefs), then install this one.
 
-1. Установить Shizuku из официального источника `https://shizuku.rikka.app/download/`.
-2. Включить отладку по ADB и (после установки Shizuku) запустить:
+## Build using GitHub Actions
 
-```bash
-adb shell sh /sdcard/Android/data/moe.shizuku.privileged.api/start.sh
-```
+Replace project files, commit/push the repo, and run **Actions → Build experimental Nari TV APK**.
+The workflow installs Android API 35 / Build Tools 35 and runs `gradle :app:assembleDebug`. The APK is under the **nari-tv-router-debug-apk** artifact.
 
-3. Установить `app-debug.apk`: `adb install -r app-debug.apk`.
-4. Открыть `Nari TV Router` и разрешить доступ через Shizuku.
-5. Проверить ALSA card, по умолчанию будет найден из AudioManager (если имя выхода содержит Razer).
-6. Нажать «Проверить Game (без отключения Chat)». Проверить в ADB `dumpsys media.audio_policy`, появился ли `device=1`.
-7. Если появился, нажать «Переключить весь звук на Game» и проверить воспроизведение на небольшой громкости.
-8. Для возврата — «Вернуть Chat» или переподключение донгла.
+Install using `adb install -r app-debug.apk` if signed by the same debug key, otherwise uninstall the old package first.
 
-**Важно:** пока это проверка гипотезы. Имеющееся у пользователя право `MODIFY_AUDIO_ROUTING` у `com.android.shell` означает возможность вызвать API, но не гарантирует, что USB HAL сможет открыть второй выход. На пользовательской прошивке TCL это может быть заблокировано.
+## Test sequence
 
-## Безопасность
+1. Enable Shizuku, then start Nari TV Router. Confirm correct ALSA card. Keep the headphone volume low for test.
+2. With current working Game route, turn off/on or unplug/replug the USB dongle until the sound becomes stuck.
+3. Press **Обновить Game** once and test if sound comes back **without manually switching TV audio outputs**.
+4. If yes, enable **Автовосстановление USB**, close the application, then disconnect/reconnect the USB dongle. Check the actual sound and app's **Посмотреть состояние автоматики**.
+5. If physical sound remains absent, restore Chat and provide the app auto-status + `adb logcat -d -s NariTV:*` for further debug.
 
-- Программа не изменяет прошивку, файлы `/vendor` и `/system`.
-- По нажатию кнопок только отправляет Binder-события подключения/отключения двух выходов.
-- Выход D1 сначала добавляется без удаления D0.
-- Из-за особенностей прошивки звук может исчезнуть при переключении; переподключение донгла восстановит штатное обнаружение.
-- Shizuku требуется запускать после каждой перезагрузки телевизора (в режиме ADB без root).
-- Работающую команду надо повторять после переподключения донгла.
-- Сторонние приложения не получают право `MODIFY_AUDIO_ROUTING` автоматически.
+## Changes
 
-## Исходники
+- Shizuku UserService switched to `daemon(true)` and version 2, to survive closing the UI.
+- Shizuku UserService polls ALSA presence and uses `AudioSystem.getDeviceConnectionState()` when supported.
+- Manual Game reinitialization intentionally disconnects and reconnects **Game**, unlike the old 'switch' function that simply re-announces the currently available output.
+- No modifications to `/system`, `/vendor`, or root permissions.
 
-- `app/src/main/java/dev/naritv/RouteService.java` — привилегированный Shizuku UserService, скрытый Binder AudioService.
-- `app/src/main/java/dev/naritv/MainActivity.java` — интерфейс под пульт Android TV.
-- `app/src/main/aidl/dev/naritv/IRouteService.aidl` — контракт между UI и UserService.
-- `.github/workflows/build-apk.yml` — сборка в GitHub Actions.
+Source: `app/src/main/java/dev/naritv/RouteService.java`, `MainActivity.java`, `IRouteService.aidl`.
